@@ -3,148 +3,130 @@ package eu.kanade.tachiyomi.extension.all.nijiero
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
-import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.model.UpdateStrategy
-import eu.kanade.tachiyomi.source.online.HttpSource
-import eu.kanade.tachiyomi.util.asJsoup
+import eu.kanade.tachiyomi.source.online.ParsedHttpSource
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Request
-import okhttp3.Response
-import org.jsoup.select.Evaluator
+import org.jsoup.nodes.Document
+import org.jsoup.nodes.Element
 import java.text.SimpleDateFormat
 import java.util.Locale
 
-class Nijiero : HttpSource() {
+class Nijiero : ParsedHttpSource() {
     override val name = "Nijiero"
     override val lang = "all"
-    override val supportsLatest = false
+    override val supportsLatest = true
 
     override val baseUrl = "https://www.nijiero-ch.com"
 
     override val client = network.client.newBuilder().followRedirects(true).build()
+	
     class TagFilter : Filter.Select<String>("Category", nijieroTags)
 
-    override fun pageListParse(response: Response): List<Page> {
-        val document = response.asJsoup()
+    override fun pageListParse(document: Document): List<Page> {
         return document.select("#entry > ul > li a[href]").mapIndexed { i, linkElement ->
             val linkUrl = linkElement.attr("href").removeSuffix(".webp").removePrefix(baseUrl)
-            Page(i, linkUrl, linkUrl)
+            Page(i, document.location(), linkUrl)
         }
     }
 
-    override fun imageUrlParse(response: Response) = throw UnsupportedOperationException()
-    override fun latestUpdatesRequest(page: Int) = throw UnsupportedOperationException()
-    override fun latestUpdatesParse(response: Response) = throw UnsupportedOperationException()
-
-    override fun popularMangaRequest(page: Int): Request {
-        val uniqueParam = System.currentTimeMillis()
-        val url = "$baseUrl/ranking.html?refresh=$uniqueParam"
-
-        return GET(url, headers)
-    }
-    override fun popularMangaParse(response: Response): MangasPage {
-        val document = response.asJsoup()
-        val mangas = document.selectFirst("#mainContent .allRunkingArea.tabContent.cf")!!.children().mapNotNull { it ->
-            val link = it.select("a")
-            if (!link.isEmpty()) {
-                SManga.create().apply {
-                    url = link.attr("href").removePrefix(baseUrl)
-                    title = link.attr("title")
-                    thumbnail_url = it.selectFirst("img")?.attr("src")
-                    status = SManga.COMPLETED
-                }
-            } else {
-                null
-            }
-        }
-
-        return MangasPage(mangas, false)
-    }
-
+    override fun imageUrlParse(document: Document): String = throw UnsupportedOperationException()
+	
+    private val spaceRegex = Regex("""\s+""")
     override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
         val tagIdx: Int = (filters.last() as TagFilter).state
-
-        val pageType = when {
-            query.isBlank() -> "category"
-            else -> "tag"
-        }
 
         val keyword = when {
             query.isBlank() -> nijieroTags[tagIdx]
             else -> query
-        }.replace(Regex("""\s+"""), "-").lowercase()
+        }.replace(spaceRegex, "-").lowercase()
 
         val uniqueParam = System.currentTimeMillis()
-        val url = "$baseUrl/$pageType/$keyword/page/$page?refresh=$uniqueParam"
+        var url = baseUrl.toHttpUrl().newBuilder()
+            .addEncodedPathSegment("category")
+            .addEncodedPathSegment(keyword)
+            .addEncodedPathSegment("page")
+            .addEncodedPathSegment(page.toString())
+            .addQueryParameter("refresh", uniqueParam.toString())
+            .build()
+		
+        // if 404, recheck
+        if (client.newCall(GET(url, headers)).execute().code == 404) {
+            url = baseUrl.toHttpUrl().newBuilder()
+                .addEncodedPathSegment("tag")
+                .addEncodedPathSegment(keyword)
+                .addEncodedPathSegment("page")
+                .addEncodedPathSegment(page.toString())
+                .addQueryParameter("refresh", uniqueParam.toString())
+                .build()
+            // if there is a better solution just *tell me* .
+        }
 
         return GET(url, headers)
     }
-    override fun searchMangaParse(response: Response): MangasPage {
-        val document = response.asJsoup()
-        var mangas = document.selectFirst(".contentList")!!.children().mapNotNull { it ->
-            val link = it.select("a")
-            if (!link.isEmpty()) {
-                SManga.create().apply {
-                    url = link.attr("href").removePrefix(baseUrl)
-                    title = link.attr("title")
-                    thumbnail_url = it.selectFirst("img")?.attr("data-src")
-                    status = SManga.COMPLETED
-                }
-            } else {
-                null
-            }
-        }
-        var isLastPage = document.selectFirst(Evaluator.Class("next page-numbers")) == null
-
-        if (mangas.isEmpty()) {
-            val currentUrl = response.request.url.toString()
-            val newUrl = if (currentUrl.contains("category/")) {
-                currentUrl.replace("category/", "tag/")
-            } else if (currentUrl.contains("tag/")) {
-                currentUrl.replace("tag/", "category/")
-            } else {
-                currentUrl
-            }
-            val newResponse = client.newCall(GET(newUrl, headers)).execute()
-            return searchMangaParse(newResponse)
-        }
-
-        return MangasPage(mangas, !isLastPage)
-    }
-
-
-    override fun mangaDetailsRequest(manga: SManga) = GET(manga.url, headers)
-    override fun mangaDetailsParse(response: Response): SManga {
-        val document = response.asJsoup()
-        return SManga.create().apply {
-            title = document.selectFirst("div.arrow.mb0 h1.type01_hl")?.text() ?: document.title()
-            thumbnail_url = document.select("meta[property=og:image]").attr("content")
-            status = SManga.COMPLETED
-            val genres = document.select("dl.cf:contains(カテゴリ) a").map { getCategoryOrTagFromLink(it.attr("href")) }
-            genre = genres.joinToString(", ")
-            update_strategy = UpdateStrategy.ONLY_FETCH_ONCE
+    override fun searchMangaNextPageSelector() = ".next.page-numbers"
+    override fun searchMangaSelector() = ".contentList > div:has(a)"
+    override fun searchMangaFromElement(element: Element) = SManga.create().apply {
+        element.select("a")?.let { link ->
+            thumbnail_url = element.selectFirst("img")?.attr("data-src") ?: element.selectFirst("img")?.attr("src")
+            title = link.attr("title")
+            setUrlWithoutDomain(link.attr("href"))
+            initialized = true
         }
     }
-    private fun getCategoryOrTagFromLink(link: String): String {
-        val segments = link.trimEnd('/').split("/")
-        return segments.lastOrNull()?.replace("-", " ") ?: ""
-    }
-
-    override fun chapterListRequest(manga: SManga): Request = GET(manga.url, headers)
-    override fun chapterListParse(response: Response): List<SChapter> {
-        val document = response.asJsoup()
-        val dateStr = document.selectFirst("div.postInfo.cf div.postDate.cf time.entry-date.date.published.updated")?.attr("datetime") ?: ""
-        val dateUpload = parseDate(dateStr)
 	
-        return listOf(
-            SChapter.create().apply {
-                name = "Chapter"
-                setUrlWithoutDomain(response.request.url.encodedPath.removePrefix(baseUrl))
-                date_upload = dateUpload
-            },
-        )
+    override fun popularMangaRequest(page: Int): Request {
+        val uniqueParam = System.currentTimeMillis()
+        val url = baseUrl.toHttpUrl().newBuilder()
+            .addPathSegment("ranking.html")
+            .addQueryParameter("refresh", uniqueParam.toString())
+            .build()
+
+        return GET(url, headers)
+    }
+    override fun popularMangaNextPageSelector() = null
+    override fun popularMangaSelector() = "#mainContent .allRunkingArea.tabContent.cf > div"
+    override fun popularMangaFromElement(element: Element) = searchMangaFromElement(element)
+
+    override fun latestUpdatesRequest(page: Int): Request {
+        val uniqueParam = System.currentTimeMillis()
+        var url = baseUrl.toHttpUrl().newBuilder()
+            .addEncodedPathSegment("page")
+            .addEncodedPathSegment(page.toString())
+            .addQueryParameter("refresh", uniqueParam.toString())
+            .build()
+
+        return GET(url, headers)
+    }
+    override fun latestUpdatesNextPageSelector() = searchMangaNextPageSelector()
+    override fun latestUpdatesSelector() = "#mainContent > div:has(a)"
+    override fun latestUpdatesFromElement(element: Element) = searchMangaFromElement(element)
+
+    override fun mangaDetailsParse(document: Document): SManga = SManga.create().apply {
+        title = document.selectFirst("div.arrow.mb0 h1.type01_hl")?.text() ?: document.title()
+        thumbnail_url = document.select("meta[property=og:image]").attr("content")
+        status = SManga.COMPLETED
+        genre = getGenres(document)
+        update_strategy = UpdateStrategy.ONLY_FETCH_ONCE
+    }
+    private fun getGenres(document: Document): String {
+        val genres = document.select("dl.cf:contains(カテゴリ) a").map {
+            it.attr("href").trimEnd('/').split("/").last()
+        }.map {
+            it.replace("-", " ")
+        }
+        return genres.joinToString()
+    }
+
+    override fun chapterListSelector() = "html"
+    override fun chapterFromElement(element: Element) = SChapter.create().apply {
+        setUrlWithoutDomain(element.select("link[rel=canonical]").attr("abs:href"))
+        chapter_number = 0F
+        name = "GALLERY"
+        date_upload = parseDate(element.selectFirst("div.postInfo.cf div.postDate.cf time.entry-date.date.published.updated")?.attr("datetime").orEmpty())
     }
 	
     private fun parseDate(dateStr: String): Long {
@@ -159,7 +141,8 @@ class Nijiero : HttpSource() {
     }
 
     override fun getFilterList(): FilterList = FilterList(
-        Filter.Header("Category search directly is broken, type the name 1:1 in search bar."),
+        Filter.Header("You can search for a tag or category, anything else will result in 404(NOT FOUND)."),
+        Filter.Header("To use category, make sure the search box is empty."),
         TagFilter(),
     )
 }
