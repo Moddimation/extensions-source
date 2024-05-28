@@ -20,15 +20,15 @@ class Nijiero : ParsedHttpSource() {
     override val lang = "all"
     override val supportsLatest = true
 
-    override val baseUrl = "https://www.nijiero-ch.com"
+    override val baseUrl = "https://nijiero-ch.com"
 
-    override val client = network.client.newBuilder().followRedirects(true).build()
+    override val client = network.cloudflareClient
 	
     class TagFilter : Filter.Select<String>("Category", nijieroTags)
 
     override fun pageListParse(document: Document): List<Page> {
         return document.select("#entry > ul > li a[href]").mapIndexed { i, linkElement ->
-            val linkUrl = linkElement.attr("href").removeSuffix(".webp").removePrefix(baseUrl)
+            val linkUrl = linkElement.attr("href").removeSuffix(".webp")
             Page(i, document.location(), linkUrl)
         }
     }
@@ -70,8 +70,10 @@ class Nijiero : ParsedHttpSource() {
     override fun searchMangaNextPageSelector() = ".next.page-numbers"
     override fun searchMangaSelector() = ".contentList > div:has(a)"
     override fun searchMangaFromElement(element: Element) = SManga.create().apply {
-        element.select("a")?.let { link ->
-            thumbnail_url = element.selectFirst("img")?.attr("data-src") ?: element.selectFirst("img")?.attr("src")
+        element.select("a").let { link ->
+            element.selectFirst("img")?.let {
+                thumbnail_url = imageFromElement(it)
+            }
             title = link.attr("title")
             setUrlWithoutDomain(link.attr("href"))
             initialized = true
@@ -120,11 +122,19 @@ class Nijiero : ParsedHttpSource() {
         }
         return genres.joinToString()
     }
+    protected open fun imageFromElement(element: Element): String? {
+        return when {
+            element.hasAttr("data-src") -> element.attr("abs:data-src")
+            element.hasAttr("data-lazy-src") -> element.attr("abs:data-lazy-src")
+            element.hasAttr("srcset") -> element.attr("abs:srcset").substringBefore(" ")
+            element.hasAttr("data-cfsrc") -> element.attr("abs:data-cfsrc")
+            else -> element.attr("abs:src")
+        }
+    }
 
     override fun chapterListSelector() = "html"
     override fun chapterFromElement(element: Element) = SChapter.create().apply {
         setUrlWithoutDomain(element.select("link[rel=canonical]").attr("abs:href"))
-        chapter_number = 0F
         name = "GALLERY"
         date_upload = parseDate(element.selectFirst("div.postInfo.cf div.postDate.cf time.entry-date.date.published.updated")?.attr("datetime").orEmpty())
     }
